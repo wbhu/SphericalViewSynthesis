@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+from os.path import join
+
 import numpy
 
 import torch
@@ -20,8 +22,8 @@ def parse_arguments(args):
     )
     parser = argparse.ArgumentParser(description=usage_text)
     # durations
-    parser.add_argument('-e', "--epochs", type=int, help="Train for a total number of <epochs> epochs.")
-    parser.add_argument('-b', "--batch_size", type=int,
+    parser.add_argument('-e', "--epochs", type=int, default=30, help="Train for a total number of <epochs> epochs.")
+    parser.add_argument('-b', "--batch_size", type=int, default=16,
                         help="Train with a <batch_size> number of samples each train iteration.")
     parser.add_argument("--test_batch_size", default=1, type=int,
                         help="Test with a <batch_size> number of samples each test iteration.")
@@ -29,18 +31,19 @@ def parse_arguments(args):
                         help='Log training progress (i.e. loss etc.) on console every <disp_iters> iterations.')
     parser.add_argument('--save_iters', type=int, default=100, help='Maximum test iterations to perform each test run.')
     # paths
-    parser.add_argument("--train_path", type=str, help="Path to the training file containing the train set files paths")
+    parser.add_argument("--save_path", type=str, default='Exp',
+                        help="save_path")
     # model
     parser.add_argument("--configuration", required=False, type=str, default='mono',
                         help="Data loader configuration <mono>, <lr>, <ud>, <tc>", choices=['mono', 'lr', 'ud', 'tc'])
     parser.add_argument('--weight_init', type=str, default="xavier",
                         help='Weight initialization method, or path to weights file (for fine-tuning or continuing training)')
-    parser.add_argument('--model', default="default", type=str, help='Model selection argument.')
+    parser.add_argument('--model', type=str, default="resnet_coord", help='Model selection argument.')
     # optimization
     parser.add_argument('-o', '--optimizer', type=str, default="adam",
                         help='The optimizer that will be used during training.')
     parser.add_argument("--opt_state", type=str, help="Path to stored optimizer state file to continue training)")
-    parser.add_argument('-l', '--lr', type=float, default=0.0002, help='Optimization Learning Rate.')
+    parser.add_argument('-l', '--lr', type=float, default=0.0001, help='Optimization Learning Rate.')
     parser.add_argument('-m', '--momentum', type=float, default=0.9, help='Optimization Momentum.')
     parser.add_argument('--momentum2', type=float, default=0.999,
                         help='Optimization Second Momentum (optional, only used by some optimizers).')
@@ -53,7 +56,7 @@ def parse_arguments(args):
     # other
     parser.add_argument('-n', '--name', type=str, default='default_name',
                         help='The name of this train/test. Used when storing information.')
-    parser.add_argument("--visdom", type=str, nargs='?', default=None, const="127.0.0.1",
+    parser.add_argument("--visdom", type=str, nargs='?', default='gpu26.cse.cuhk.edu.hk', const="127.0.0.1",
                         help="Visdom server IP (port defaults to 8097)")
     parser.add_argument("--visdom_iters", type=int, default=400,
                         help="Iteration interval that results will be reported at the visdom server for visualization.")
@@ -72,8 +75,9 @@ def parse_arguments(args):
                         help="Initialize prediction layers' bias to the given value (helps convergence).")
     # details
     parser.add_argument("--depth_thres", type=float, default=20.0, help="Depth threshold - depth clipping.")
-    parser.add_argument("--baseline", type=float, default=0.26, help="Stereo baseline distance (in either axis).")
+    parser.add_argument("--baseline", type=float, default=0.067, help="Stereo baseline distance (in either axis).")
     parser.add_argument("--width", type=float, default=512, help="Spherical image width.")
+    parser.add_argument("--data_root", type=str, default='/research/dept6/wbhu/Dataset/nvs_panorama')
     return parser.parse_known_args(args)
 
 
@@ -93,12 +97,18 @@ if __name__ == "__main__":
     # optimizer
     optimizer = utils.init_optimizer(model, args)
     # train data
-    train_data = dataset.dataset_360D.Dataset360D(args.train_path, " ", args.configuration, [256, 512])
+    # train_data = dataset.dataset_360D.Dataset360D(args.train_path, " ", args.configuration, [256, 512])
+    train_data = dataset.pabellon.Pabellon(data_root=args.data_root,
+                                           data_list=join(args.data_root, 'list/train.txt'),
+                                           loop=1)
     train_data_iterator = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, \
                                                       num_workers=args.batch_size // len(gpus) // len(gpus),
-                                                      pin_memory=False, shuffle=True)
+                                                      pin_memory=True, shuffle=True)
     # test data
-    test_data = dataset.dataset_360D.Dataset360D(args.test_path, " ", args.configuration, [256, 512])
+    # test_data = dataset.dataset_360D.Dataset360D(args.test_path, " ", args.configuration, [256, 512])
+    test_data = dataset.pabellon.Pabellon(data_root=args.data_root,
+                                          data_list=join(args.data_root, 'list/val.txt'),
+                                          loop=1)
     test_data_iterator = torch.utils.data.DataLoader(test_data, batch_size=args.test_batch_size, \
                                                      num_workers=args.batch_size // len(gpus) // len(gpus),
                                                      pin_memory=False, shuffle=True)
@@ -122,19 +132,19 @@ if __name__ == "__main__":
     plot_viz.config(**vars(args))
     for epoch in range(args.epochs):
         print("Training | Epoch: {}".format(epoch))
-        img_viz.update_epoch(epoch)
+        # img_viz.update_epoch(epoch)
         for batch_id, batch in enumerate(train_data_iterator):
             optimizer.zero_grad()
             active_loss = torch.tensor(0.0).to(device)
             ''' Data '''
-            left_rgb = batch['leftRGB'].to(device)
+            left_rgb, right_rgb = batch
+            left_rgb = left_rgb.to(device)
+            right_rgb = right_rgb.to(device)
             b, _, __, ___ = left_rgb.size()
             expand_size = (b, -1, -1, -1)
             sgrid = S360.grid.create_spherical_grid(width).to(device)
             uvgrid = S360.grid.create_image_grid(width, height).to(device)
-            right_rgb = batch['rightRGB'].to(device)
-            left_depth = batch['leftDepth'].to(device)
-            right_depth = batch['rightDepth'].to(device)
+
             ''' Prediction '''
             left_depth_pred = torch.abs(model(left_rgb))
             ''' Forward Rendering LR '''
@@ -152,8 +162,9 @@ if __name__ == "__main__":
             right_rgb_t, right_mask_t = L.splatting.render(left_rgb, left_depth_pred, \
                                                            right_render_coords, max_depth=args.depth_thres)
             ''' Loss LR '''
-            right_cutoff_mask = (right_depth < args.depth_thres)
-            right_mask_t &= ~(right_depth > args.depth_thres)
+            # right_cutoff_mask = (right_depth < args.depth_thres)
+            right_cutoff_mask = torch.ones_like(right_mask_t).to(device)
+            # right_mask_t &= ~(right_depth > args.depth_thres)
             attention_weights = S360.weights.phi_confidence(
                 S360.grid.create_spherical_grid(width)).to(device)
             # attention_weights = S360.weights.spherical_confidence(                
@@ -191,11 +202,11 @@ if __name__ == "__main__":
                 total_loss.reset()
                 running_photo_loss.reset()
                 running_depth_smooth_loss.reset()
-            if args.visdom_iters > 0 and (iteration_counter + 1) % args.visdom_iters <= args.batch_size:
-                img_viz.show_separate_images(left_rgb, 'input')
-                img_viz.show_separate_images(right_rgb, 'target')
-                img_viz.show_map(left_depth_pred, 'depth')
-                img_viz.show_separate_images(torch.clamp(right_rgb_t, min=0.0, max=1.0), 'recon')
+            # if args.visdom_iters > 0 and (iteration_counter + 1) % args.visdom_iters <= args.batch_size:
+            #     img_viz.show_separate_images(left_rgb, 'input')
+            #     img_viz.show_separate_images(right_rgb, 'target')
+            #     img_viz.show_map(left_depth_pred, 'depth')
+            #     img_viz.show_separate_images(torch.clamp(right_rgb_t, min=0.0, max=1.0), 'recon')
         ''' Save '''
         print("Saving model @ epoch #" + str(epoch))
         utils.checkpoint.save_network_state(model, optimizer, epoch, \
@@ -207,24 +218,26 @@ if __name__ == "__main__":
             rmse_avg = torch.tensor(0.0).float()
             counter = torch.tensor(0.0).float()
             for test_batch_id, test_batch in enumerate(test_data_iterator):
-                left_rgb = test_batch['leftRGB'].to(device)
+                left_rgb, right_rgb = batch
+                left_rgb = left_rgb.to(device)
+                right_rgb = right_rgb.to(device)
                 b, c, h, w = left_rgb.size()
                 rads = sgrid.expand(b, -1, -1, -1)
                 uv = uvgrid.expand(b, -1, -1, -1)
                 left_depth_pred = torch.abs(model(left_rgb))
-                left_depth = test_batch['leftDepth'].to(device)
-                left_depth[torch.isnan(left_depth)] = 50.0
-                left_depth[torch.isinf(left_depth)] = 50.0
-                mse = (left_depth_pred ** 2) - (left_depth ** 2)
-                mse[torch.isnan(mse)] = 0.0
-                mse[torch.isinf(mse)] = 0.0
-                mask = (left_depth < args.depth_thres).float()
-                if torch.sum(mask) == 0:
-                    continue
-                rmse = torch.sqrt(torch.sum(mse * mask) / torch.sum(mask).float())
-                if not torch.isnan(rmse):
-                    rmse_avg += rmse.cpu().float()
-                    counter += torch.tensor(b).float()
+                # left_depth = test_batch['leftDepth'].to(device)
+                # left_depth[torch.isnan(left_depth)] = 50.0
+                # left_depth[torch.isinf(left_depth)] = 50.0
+                # mse = (left_depth_pred ** 2) - (left_depth ** 2)
+                # mse[torch.isnan(mse)] = 0.0
+                # mse[torch.isinf(mse)] = 0.0
+                # mask = (left_depth < args.depth_thres).float()
+                # if torch.sum(mask) == 0:
+                #     continue
+                # rmse = torch.sqrt(torch.sum(mse * mask) / torch.sum(mask).float())
+                # if not torch.isnan(rmse):
+                #     rmse_avg += rmse.cpu().float()
+                counter += torch.tensor(b).float()
                 if counter < args.save_iters:
                     disp = torch.cat(
                         (
